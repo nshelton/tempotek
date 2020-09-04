@@ -2,17 +2,21 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Linq;
 using UnityEngine;
 
 public enum LineType
 {
     correlationWeights,
-    correlationWeightsLaplacian,
+    weights,
+    doubleCorr,
     levels,
     histogram,
     lfo,
     beat,
-    bpm
+    bpm,
+    rollingAvg,
+    fft
 }
 
 public class LineVisualizer : MonoBehaviour
@@ -24,21 +28,21 @@ public class LineVisualizer : MonoBehaviour
 
     [Range(0,5)]
     public float m_pow = 1.0f;
-
     private float[] m_targetArray;
-
     public LineType m_lineType = LineType.correlationWeights;
-
 
     void Update()
     {
         switch (m_lineType)
         {
-            case LineType.correlationWeightsLaplacian:
-                m_targetArray = m_beatDetector.m_currentWeightsLaplacian;
+            case LineType.doubleCorr:
+                m_targetArray = m_beatDetector.m_doubleCorrelation;
                 break;
             case LineType.correlationWeights:
                 m_targetArray = m_beatDetector.m_currentWeights;
+                break;
+            case LineType.weights:
+                m_targetArray = m_beatDetector.m_weights;
                 break;
             case LineType.levels:
                 m_targetArray = m_beatDetector.m_currentLevels;
@@ -46,9 +50,16 @@ public class LineVisualizer : MonoBehaviour
             case LineType.histogram:
                 m_targetArray = m_beatDetector.m_bpmHistogram;
                 break;
+            case LineType.rollingAvg:
+                m_targetArray = m_beatDetector.m_rollingCorrAverage;
+                break;
+            case LineType.fft:
+                m_targetArray = m_beatDetector.m_fftMag;
+                break;
+            case LineType.lfo:
+                m_targetArray = m_beatDetector.m_beatLFO;
+                break;
         }
-       
-
 
         if (m_positions == null || m_positions.Length != m_targetArray.Length)
         {
@@ -56,12 +67,15 @@ public class LineVisualizer : MonoBehaviour
             m_lineRenderer.positionCount = m_positions.Length;
         }
 
-        for (int i =0; i < m_targetArray.Length; i++)
-        {
-            m_positions[i].x = (float)i / m_targetArray.Length;
-            m_positions[i].y = Mathf.Pow(m_targetArray[i], m_pow);
+        float maxVal = Mathf.Max(m_targetArray.Max(), Mathf.Abs(m_targetArray.Min()));
+        
+        if ( maxVal > 0 )
+            for (int i =0; i < m_targetArray.Length; i++)
+            {
+                m_positions[i].x = (float)i / m_targetArray.Length;
+                m_positions[i].y =  m_targetArray[i] / maxVal;
  
-        }
+            }
 
         m_lineRenderer.SetPositions(m_positions);
 

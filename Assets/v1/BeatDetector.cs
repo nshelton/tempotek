@@ -1,46 +1,56 @@
 ﻿using Lasp;
-using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using CircularBuffer;
-using UnityEditor.Rendering;
 using System;
-using System.Dynamic;
-using UnityEngine.SocialPlatforms.Impl;
 
 public class BeatDetector : MonoBehaviour
 {
-
     int RMS_HISTORY_LENGTH = 1024;
+    int UPSAMPLE = 4;
+    int MAX_SHIFT = 512;
 
-    int MAX_SHIFT = 256;
-
+    [SerializeField] Camera m_camera = null;
     [SerializeField] AudioLevelTracker m_level = null;
+    [SerializeField] SpectrumAnalyzer m_spectrum = null;
 
     CircularBuffer<float> m_levelBuffer;
+    CircularBuffer<float> m_circularBeatLFOBuffer;
 
     [SerializeField] float m_correlationLerp = 0.99f;
+    [SerializeField] float m_fluxLerp = 0.99f;
     [SerializeField] float m_bpmAttentionSpan = 0.999f;
+
+    public float m_lastProcessingTime;
 
     public float[] m_weights;
     public float[] m_currentWeights;
-    public float[] m_currentWeightsLaplacian;
+    public float[] m_doubleCorrelation;
+    public float[] m_rollingCorrAverage;
+    public float[] m_fftMag;
+
     public float[] m_currentLevels;
     public float[] m_bpmHistogram;
+
+    public float[] m_lastSpectrum;
+    public float[] m_beatLFO;
 
     int frameNum = 0;
     public float BPM = 0;
     public float rawFreq = 0;
     public float fitFreq = 0;
     public float fitFreqBPM = 0;
+    public int m_grooveHighpass = 10;
+
+    public bool m_useFlux = false;
+    public float m_confidence = 0;
 
     int MIN_BPM = 60;
     int MAX_BPM = 180;
 
-
-    [NonSerialized] public float[] currentPeaks = new float[16];
-    [NonSerialized] public float[] currentPeakWeights = new float[16];
-    [NonSerialized] public float[] harmonicPeaks = new float[9];
+    [NonSerialized] public float[] currentPeaks = new float[32];
+    [NonSerialized] public float[] currentPeakWeights = new float[32];
+    [NonSerialized] public float[] harmonicPeaks = new float[17];
 
     float phaseOffset = 0;
     public float harmonicThreshold = 1f;
@@ -48,56 +58,125 @@ public class BeatDetector : MonoBehaviour
 
     public float GetBeat(int multiplier)
     {
-         return 1f - Fract((Time.time - phaseOffset) * (BPM / multiplier) / 60f); 
+         return Mathf.Sin(Mathf.PI * 2 *  (Time.time - phaseOffset) * (BPM / multiplier) / 60f); 
     }
 
     private float[] m_hammingLUT;
 
     void Start()
     {
+        m_lastSpectrum = new float[m_spectrum.resolution];
+
         m_weights = new float[MAX_SHIFT]; 
         m_currentWeights = new float[m_weights.Length];
-        m_currentWeightsLaplacian = new float[m_weights.Length];
+        m_doubleCorrelation = new float[m_weights.Length];
+        m_fftMag = new float[m_weights.Length];
+        m_rollingCorrAverage = new float[m_weights.Length];
+
         m_currentLevels = new float[RMS_HISTORY_LENGTH];
         m_hammingLUT = new float[RMS_HISTORY_LENGTH];
-        
-        //m_bpmHistogram = new float[(MAX_BPM - MIN_BPM) * BPM_DIVISIONS];
+        m_beatLFO = new float[RMS_HISTORY_LENGTH];
+
+
         m_bpmHistogram = new float[256];
         m_levelBuffer = new CircularBuffer<float>(RMS_HISTORY_LENGTH);
+        m_circularBeatLFOBuffer = new CircularBuffer<float>(RMS_HISTORY_LENGTH);
 
         for(int i =0;i < RMS_HISTORY_LENGTH; i++)
         {
             m_hammingLUT[i] = 0.54f - 0.46f * Mathf.Cos((2 * Mathf.PI * i) / (RMS_HISTORY_LENGTH - 1));
+            m_levelBuffer.PushBack(0);
         }
     }
 
-    // Update is called at 50 FPS
-    void FixedUpdate()
+    private void CalculateAutocorrelation(float[] array, ref float[] acorr, int maxShift)
     {
-
-        m_levelBuffer.PushBack(m_level.normalizedLevel);
-
-        var arr = m_levelBuffer.ToArray();
-        Array.Copy(arr, m_currentLevels, arr.Length);
-
-        for (int s = 0; s < MAX_SHIFT; s ++)
+        for (int s = 0; s < maxShift; s++)
         {
             float sad = 0;
             float numSamples = 0;
-            for ( int i = 0; i < arr.Length; i ++)
+            for (int i = 0; i < array.Length; i++)
             {
-                if (  i + s < arr.Length )
+                if (i + s < array.Length)
                 {
-                    float window = m_hammingLUT[i];
+                    float window = 1;// m_hammingLUT[i];
 
-                    sad += Mathf.Abs(arr[i] - arr[i + s]) * window;
+                    sad += Mathf.Abs(array[i] - array[i + s]) * window;
                     numSamples += window;
                 }
             }
 
-            if ( numSamples > 0)
-                m_currentWeights[s] = sad / numSamples;
+            if (numSamples > 0)
+            {
+                acorr[s] = sad / numSamples;
+            }
         }
+    }
+
+    float lastFlux;
+
+
+    private float GetFlux()
+    {
+        float flux = 0;
+
+        for(int i =0; i < m_spectrum.resolution; i++)
+        {
+            float powerCurve = 1f - (float)i / (float)m_spectrum.resolution;
+
+             powerCurve = Mathf.Pow(powerCurve, 4f);
+
+            flux += 10f * powerCurve * Mathf.Abs(m_spectrum.spectrumArray[i] - m_lastSpectrum[i]);
+            m_lastSpectrum[i] = m_spectrum.spectrumArray[i];
+        }
+        flux /= m_spectrum.resolution;
+
+
+        if (flux == 0)
+            return lastFlux;
+
+        if (float.IsNaN(flux) || float.IsInfinity(flux))
+        {
+            flux = 0;
+        }
+        
+        return flux;
+    }
+
+
+    float lerpedFlux;
+
+
+
+    // Update is called at 50 FPS
+    void FixedUpdate()
+    {
+        var startTime = DateTime.Now;
+        bool useLevel = false;
+
+        if (m_useFlux)
+        {
+            lerpedFlux = (1f - m_fluxLerp) * GetFlux() + m_fluxLerp * lerpedFlux;
+            m_levelBuffer.PushBack(lerpedFlux);
+        }
+        else
+        {
+            m_levelBuffer.PushBack(m_level.normalizedLevel);
+        }
+
+        var arr = m_levelBuffer.ToArray();
+        Array.Copy(arr, m_currentLevels, arr.Length);
+
+        m_circularBeatLFOBuffer.PushBack(GetBeat(1) * m_confidence);
+
+        m_camera.backgroundColor = Color.white * (0.5f + 0.5f * GetBeat(1));
+        var beatArr = m_circularBeatLFOBuffer.ToArray();
+
+        Array.Copy(beatArr, m_beatLFO, beatArr.Length);
+
+        CalculateAutocorrelation(arr, ref m_currentWeights, MAX_SHIFT);
+
+        //CalculateAutocorrelation(m_currentWeights, ref m_doubleCorrelation, MAX_SHIFT);
 
         float alpha = m_correlationLerp;
 
@@ -112,29 +191,103 @@ public class BeatDetector : MonoBehaviour
             currentPeakWeights[i] = 0;
         }
 
-        GetPeaks(m_weights, 15);
+        GetPeaks(m_weights);
 
         GetHarmonicFromPeaks(ref currentPeaks, ref harmonicPeaks);
 
         GetMaxBPM();
 
+        GetFFT(m_rollingCorrAverage);
+
+
         float thisFreq = BPM / 60f;
-
-        for(int i = 1; i < m_currentWeights.Length-1; i++)
-        {
-            m_currentWeightsLaplacian[i] =
-                m_currentWeights[i - 1] - 2f * m_currentWeights[i] + m_currentWeights[i + 1];
-
-        }
 
         if ( Input.GetKeyDown(KeyCode.Space))
         {
             phaseOffset = Time.time;
         }
-     
+
+        if (Input.GetKeyDown(KeyCode.S))
+        {
+            var ts = DateTime.Now.Millisecond;
+            string filename = @"D:\tempotek\" + ts.ToString();
+            UnityEngine.Debug.Log("writing " + filename);
+            string[] lines = new string[arr.Length];
+            for(int i = 0; i< arr.Length; i++)
+            {
+                lines[i] = arr[i].ToString();
+            }
+            System.IO.File.WriteAllLines(filename, lines);
+
+        }
+
         frameNum++;
+        m_lastProcessingTime = (float)(DateTime.Now - startTime).TotalMilliseconds;
     }
 
+    float[] swap = new float[512 * 4];
+
+    private void Upsample(float[] input, ref float[] output)
+    {
+        for (int i = 0; i < input.Length-1; i++)
+        {
+            float a = input[i];
+            float b = input[i + 1];
+            for (int j = 0; j < UPSAMPLE; j++)
+            {
+                float alpha = (float)j / (float)UPSAMPLE;
+                swap[i * UPSAMPLE + j] = alpha * input[i+1] + (1f - alpha) * input[i];
+            }
+        }
+
+        for (int i = 1; i < output.Length - 1; i++)
+        {
+            output[i] = swap[i - 1] + swap[i] + swap[i + 1];
+            output[i] /= 3f;
+        }
+    }
+
+
+    float[] m_real;
+    float[] m_imag;
+
+    private void GetFFT(float[] data)
+    {
+        if (m_real == null || m_real.Length != data.Length)
+        {
+            m_real = new float[data.Length * UPSAMPLE];
+            m_imag = new float[data.Length * UPSAMPLE];
+        }
+
+        Upsample(data, ref m_real);
+
+        for(int i = 0; i < m_imag.Length; i++)
+            m_imag[i] = 0;
+
+        NAudio.Dsp.FastFourierTransform.FFT(true, 8, m_real, m_imag);
+
+        for(int i = 0; i < m_fftMag.Length; i++)
+        {
+           m_fftMag[i] = Mathf.Sqrt(m_real[i] * m_real[i] + m_imag[i] * m_imag[i]);
+          //  m_fftMag[i] = m_real[i];
+        }
+
+        int maxIndex = 0;
+        float maxValue = 0;
+        
+        for(int i = 0; i < m_fftMag.Length; i++)
+        {
+            if (m_fftMag[i] > maxValue)
+            {
+                maxValue = m_fftMag[i];
+                maxIndex = i;
+            }
+        }
+
+        //UnityEngine.Debug.Log(16f * getLagrangeMinimum(maxIndex, m_fftMag) * (60f * 50f / 1024f ));
+        //UnityEngine.Debug.Log(16f * maxIndex * (60f * 50f / 1024f ));
+
+    }
 
     private int HowManyOverlap(ref float[] peaks, float freq)
     {
@@ -306,18 +459,47 @@ public class BeatDetector : MonoBehaviour
         return i - Mathf.Floor(i);
     }
 
-    public void  GetPeaks(float[] data, int start)
+
+    public void GetPeaks(float[] data)
     {
+
+        m_confidence = 0;
+
+        int radius = m_grooveHighpass;
+        int windowSize = radius * 2 + 1;
+        float sum = 0;
+
+        for (int i = 0; i < windowSize; i++)
+        {
+            sum += data[i];
+            m_rollingCorrAverage[i] =  sum/(float)(i+1) - data[i];
+        }
+
+        for (int i = radius; i < data.Length - radius; i++)
+        {
+            sum += data[i + radius];
+            sum -= data[i - radius];
+
+            float rollingAvg = sum/windowSize;
+            m_rollingCorrAverage[i] =  rollingAvg - data[i];
+            m_confidence += Mathf.Abs(m_rollingCorrAverage[i]) / data.Length;
+        }
+
+        //int peakIndex = 1
+        // currentPeaks[0] = 0;
+        //for (int i = start + 1; i < data.Length - 1; i++)
+        
         var peakIndex = 1;
         currentPeaks[0] = 0;
-        for (int i = start+1; i < data.Length - 1; i ++)
+        bool isPeak = false;
+        bool wasIncreasing = false;
+
+        for (int i = 1; i < m_rollingCorrAverage.Length-1; i ++)
         {
             if ( data[i-1] > data[i] && data[i+1] > data[i])
             {
-                currentPeaks[peakIndex] = getLagrangeMinimum(i, data);
-                currentPeakWeights[peakIndex] = 
-                    Mathf.Abs(data[i - 1] - data[i]) + 
-                    Mathf.Abs(data[i + 1] - data[i]) ;
+                currentPeaks[peakIndex] = getLagrangeMinimum(i, m_rollingCorrAverage);
+                currentPeakWeights[peakIndex] = m_rollingCorrAverage[i];
 
                 peakIndex++;
 

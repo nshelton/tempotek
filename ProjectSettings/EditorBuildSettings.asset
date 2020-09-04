@@ -4,5 +4,8 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/BPM 2.unity
+    guid: f9bdbf19dead5e747ba8891a064c548f
   m_configObjects: {}
