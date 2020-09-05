@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 using CircularBuffer;
 using System;
+using System.Linq;
 
 public class BeatDetector2 : MonoBehaviour
 {
@@ -16,9 +17,12 @@ public class BeatDetector2 : MonoBehaviour
 
     public float m_lastProcessingTime;
 
+    public int Divisions = 1;
+
     public float[] m_autoCorr;
     public float[] m_autCorrHighpass;
     public float[] m_autCorrHighpassSmooth;
+    public float[] m_autCorrHighpassSmoothConfidence;
 
     public float[] m_currentLevels;
 
@@ -31,6 +35,12 @@ public class BeatDetector2 : MonoBehaviour
     int MIN_BPM = 60;
     int MAX_BPM = 180;
     int NUM_IMPORTANT_PEAKS = 20;
+
+    public float Sensitivity
+    {
+        get { return m_smoothing; }
+        set { m_smoothing = value; }
+    }
 
     public class Peak
     {
@@ -63,6 +73,7 @@ public class BeatDetector2 : MonoBehaviour
         m_autoCorr = new float[MAX_SHIFT];
         m_autCorrHighpass = new float[MAX_SHIFT];
         m_autCorrHighpassSmooth = new float[MAX_SHIFT];
+        m_autCorrHighpassSmoothConfidence = new float[MAX_SHIFT];
 
         m_levelBuffer = new CircularBuffer<float>(RMS_HISTORY_LENGTH);
         m_currentLevels = new float[RMS_HISTORY_LENGTH];
@@ -71,8 +82,6 @@ public class BeatDetector2 : MonoBehaviour
         {
             m_levelBuffer.PushBack(0);
         }
-
-        
         m_bestPeaks.Clear();
         for (int i = 0; i < NUM_IMPORTANT_PEAKS; i++)
         {
@@ -118,6 +127,7 @@ public class BeatDetector2 : MonoBehaviour
         for (int i = 0; i < windowSize; i++)
         {
             sum += m_autoCorr[i];
+            m_autCorrHighpassSmoothConfidence[i] = 0;
         }
 
         for (int i = m_grooveHighpass; i < MAX_SHIFT - m_grooveHighpass; i++)
@@ -134,17 +144,43 @@ public class BeatDetector2 : MonoBehaviour
         float lowpassSum = 0;
         windowSize = m_grooveLowpass * 2 + 1;
 
+        float minCorr = m_autCorrHighpassSmooth.Min();
+        float maxCorr = m_autCorrHighpassSmooth.Max();
+
+        float sumSq = 0;
+
+        for(int i  =0; i < MAX_SHIFT; i++)
+        {
+           float d = m_autCorrHighpassSmooth[i] - m_autCorrHighpass[i];
+            sumSq += d * d;
+        }
+        sumSq /= MAX_SHIFT;
+        float weight = m_smoothing * (Mathf.Pow(sumSq * 0.01f, 4f));
+       // UnityEngine.Debug.Log("sumSq:" + weight);
+
+
         for (int i = 0; i < m_grooveLowpass; i++)
         {
             lowpassSum += m_autCorrHighpass[i];
+            m_autCorrHighpassSmoothConfidence[i] = 0;
         }
 
         for (int i = m_grooveLowpass; i < MAX_SHIFT- m_grooveLowpass; i++)
         {
             lowpassSum += m_autCorrHighpass[i + m_grooveLowpass];
             lowpassSum -= m_autCorrHighpass[i - m_grooveLowpass];
+            //m_autCorrHighpassSmooth[i] = Mathf.Lerp(m_autCorrHighpassSmooth[i], lowpassSum /windowSize, weight);
 
-            m_autCorrHighpassSmooth[i] = Mathf.Lerp(m_autCorrHighpassSmooth[i], lowpassSum, m_smoothing);
+
+            float newValue = m_autCorrHighpass[i];
+            float currentValue = m_autCorrHighpassSmooth[i];
+
+            float variance =  (currentValue - newValue) * (currentValue - newValue);
+
+            m_autCorrHighpassSmoothConfidence[i] = variance;
+
+            m_autCorrHighpassSmooth[i] = Mathf.Lerp(m_autCorrHighpassSmooth[i], lowpassSum / windowSize, m_smoothing);
+
         }
 
 
@@ -182,19 +218,12 @@ public class BeatDetector2 : MonoBehaviour
         AnalyzePeaks(m_bestPeaks);
 
         m_lastProcessingTime = (float)(DateTime.Now - startTime).TotalMilliseconds;
-
         if (Input.GetKey(KeyCode.Space))
         {
             phaseOffset = Time.time;
         }
 
     }
-
-    int NUM_HARMONICS = 20;
-
-    int[] signatures = new int[] { 2, 3, 4, 5, 6, 7, 8 };
-
-    float HARMONIC_THRESHOLD = 5f;
 
     private void AnalyzePeaks(List<Peak> peaks)
     {
@@ -213,8 +242,8 @@ public class BeatDetector2 : MonoBehaviour
         {
             float main = peaks[p].index;
 
-            for (int i = 0; i < 8; i++)
-            for (int ii = 0; ii < 8; ii++)
+            for (int i = 1; i <= 8; i++)
+            for (int ii = 1; ii <= 8; ii++)
             {
                 float ratio = (float)i / (float)ii;
                 int index = (int)Mathf.Round(main * ratio);
@@ -230,9 +259,10 @@ public class BeatDetector2 : MonoBehaviour
         float bestGridPeriod = bestPeak;
         float bestScore = 0;
 
-
         for (int i = 2; i < 9; i++)
         {
+            if (i %2 ==1||i==6)
+                continue;
             float candidate = bestPeak * i;
             float score = HowManyOverlap(candidate);
             if (score > bestScore)
@@ -244,6 +274,8 @@ public class BeatDetector2 : MonoBehaviour
 
         for (int i = 1; i < 9; i++)
         {
+            if (i % 2 == 1 || i == 6)
+                continue;
             float candidate = bestPeak / (float) i;
             float score = HowManyOverlap(candidate);
             if (score > bestScore)
@@ -253,6 +285,7 @@ public class BeatDetector2 : MonoBehaviour
             }
         }
 
+        Divisions = Mathf.FloorToInt(bestPeak / bestGridPeriod);
 
         // Find peaks on grid
         float sumX = 0;
@@ -278,7 +311,22 @@ public class BeatDetector2 : MonoBehaviour
         }
 
         float bestFitPeriod = sumY / sumX;
-        UnityEngine.Debug.Log("WINNER:" + bestGridPeriod + "\t" + bestFitPeriod);
+
+        for(int i = 0; i < 4; i++)
+        {
+            var bpm = GetBPMFromOffset(bestFitPeriod);
+
+            if (bpm > MAX_BPM)
+            {
+                bestFitPeriod *= 2;
+            }
+            else if (bpm < MIN_BPM)
+            {
+                bestFitPeriod /= 2;
+            }
+        }
+
+        BPM = GetBPMFromOffset(bestFitPeriod);
 
         // generate fitted grid
         m_grid.Clear();
@@ -303,7 +351,7 @@ public class BeatDetector2 : MonoBehaviour
             for (int ii = 0; ii < m_bestPeaks.Count; ii++)
             {
                 float diff = Mathf.Abs(m_bestPeaks[ii].index - targetIndex);
-                if (diff < 3)
+                if (diff < 1)
                 {
                     overlap+= m_bestPeaks[ii].value + m_bestPeaks[ii].harmonics + 1;
                     break;

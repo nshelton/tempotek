@@ -11,6 +11,7 @@ public enum LineType2
     autoCorrelation,
     autoCorrelationHighpass,
     autoCorrelationHighpassSmooth,
+    confidence,
 }
 
 public class LineVisualizer2 : MonoBehaviour
@@ -41,6 +42,10 @@ public class LineVisualizer2 : MonoBehaviour
 
             case LineType2.autoCorrelationHighpassSmooth:
                 m_targetArray = m_beatDetector2.m_autCorrHighpassSmooth;
+                break;
+
+            case LineType2.confidence:
+                m_targetArray = m_beatDetector2.m_autCorrHighpassSmoothConfidence;
                 break;
 
         }
