@@ -10,15 +10,17 @@ public class BeatDetector2 : MonoBehaviour
     public int RMS_HISTORY_LENGTH = 512;
     public int MAX_SHIFT = 256;
 
-    [SerializeField] Camera m_camera = null;
     [SerializeField] AudioLevelTracker m_level = null;
+    [SerializeField] SpectrumAnalyzer m_spectrum = null;
 
     CircularBuffer<float> m_levelBuffer;
+    CircularBuffer<float> m_fluxBuffer;
 
     public float m_lastProcessingTime;
 
     public int Divisions = 1;
 
+    public float[] m_flux;
     public float[] m_autoCorr;
     public float[] m_autCorrHighpass;
     public float[] m_autCorrHighpassSmooth;
@@ -26,15 +28,22 @@ public class BeatDetector2 : MonoBehaviour
 
     public float[] m_currentLevels;
 
-    public float m_smoothing = 0.99f;
+    public float m_smoothing = 0.001f;
+    public float m_beatSmooth = 0.001f;
+    
     public int m_grooveHighpass = 10;
     public int m_grooveLowpass = 1;
 
     public float m_confidence = 0;
+    public float m_bestPeriodSmooth = 0;
+
+    public float[] m_lastSpectrum;
 
     int MIN_BPM = 60;
     int MAX_BPM = 180;
     int NUM_IMPORTANT_PEAKS = 20;
+
+    float MATCH_THRESHOLD = 1.5f;
 
     public float Sensitivity
     {
@@ -52,6 +61,7 @@ public class BeatDetector2 : MonoBehaviour
     [NonSerialized] public List<Peak> m_currentPeaks = new List<Peak>();
     [NonSerialized] public List<Peak> m_bestPeaks = new List<Peak>();
     [NonSerialized] public List<Peak> m_grid = new List<Peak>();
+    [NonSerialized] public List<Peak> m_alignedGrid = new List<Peak>();
 
     float phaseOffset = 0;
 
@@ -62,11 +72,46 @@ public class BeatDetector2 : MonoBehaviour
 
     public float GetBeat(int multiplier)
     {
+         //return Fract( (Time.time - phaseOffset) * (BPM / Mathf.Pow(Divisions, multiplier-1)) / 60f); 
          return Fract( (Time.time - phaseOffset) * (BPM / multiplier) / 60f); 
     }
 
     
     public float BPM;
+
+
+    private float GetFlux()
+    {
+        float flux = 0;
+
+
+        for (int i = 0; i < m_spectrum.resolution; i++)
+        {
+            float powerCurve = 1f / ((float)i +1f);
+
+            flux += powerCurve * Mathf.Abs(m_spectrum.spectrumArray[i] - m_lastSpectrum[i]);
+        }
+
+        flux /= m_spectrum.resolution;
+
+        if (float.IsNaN(flux) || float.IsInfinity(flux))
+        {
+            flux = 0;
+        }
+
+
+        for (int i = 0; i < m_spectrum.resolution; i++)
+        {
+            if (float.IsNaN(m_lastSpectrum[i]))
+                m_lastSpectrum[i] = 0f;
+
+            m_lastSpectrum[i] = Mathf.Lerp(m_spectrum.spectrumArray[i], m_lastSpectrum[i], 0.9f);
+        }
+
+
+        return flux;
+    }
+
 
     void Start()
     {
@@ -76,10 +121,15 @@ public class BeatDetector2 : MonoBehaviour
         m_autCorrHighpassSmoothConfidence = new float[MAX_SHIFT];
 
         m_levelBuffer = new CircularBuffer<float>(RMS_HISTORY_LENGTH);
+        m_fluxBuffer = new CircularBuffer<float>(RMS_HISTORY_LENGTH);
         m_currentLevels = new float[RMS_HISTORY_LENGTH];
+        m_flux = new float[RMS_HISTORY_LENGTH];
+
+        m_lastSpectrum = new float[m_spectrum.resolution];
 
         for (int i = 0; i < RMS_HISTORY_LENGTH; i++)
         {
+            m_fluxBuffer.PushBack(0);
             m_levelBuffer.PushBack(0);
         }
         m_bestPeaks.Clear();
@@ -89,6 +139,7 @@ public class BeatDetector2 : MonoBehaviour
         }
 
     }
+    float fluxLerp = 0;
 
     // Update is called at 50 FPS
     void FixedUpdate()
@@ -102,8 +153,12 @@ public class BeatDetector2 : MonoBehaviour
 
         m_levelBuffer.PushBack(m_level.normalizedLevel);
 
+        fluxLerp = Mathf.Lerp(fluxLerp, GetFlux(), 0.5f);
+        m_fluxBuffer.PushBack(fluxLerp);
+        Array.Copy(m_fluxBuffer.ToArray(), m_flux, RMS_HISTORY_LENGTH);
+
         var rms = m_levelBuffer.ToArray();
-        Array.Copy(rms, m_currentLevels, rms.Length);
+        Array.Copy(rms, m_currentLevels, RMS_HISTORY_LENGTH);
 
         // m_camera.backgroundColor = Color.white * (0.5f + 0.5f * GetBeat(1));
 
@@ -158,7 +213,6 @@ public class BeatDetector2 : MonoBehaviour
         float weight = m_smoothing * (Mathf.Pow(sumSq * 0.01f, 4f));
        // UnityEngine.Debug.Log("sumSq:" + weight);
 
-
         for (int i = 0; i < m_grooveLowpass; i++)
         {
             lowpassSum += m_autCorrHighpass[i];
@@ -171,7 +225,6 @@ public class BeatDetector2 : MonoBehaviour
             lowpassSum -= m_autCorrHighpass[i - m_grooveLowpass];
             //m_autCorrHighpassSmooth[i] = Mathf.Lerp(m_autCorrHighpassSmooth[i], lowpassSum /windowSize, weight);
 
-
             float newValue = m_autCorrHighpass[i];
             float currentValue = m_autCorrHighpassSmooth[i];
 
@@ -180,7 +233,6 @@ public class BeatDetector2 : MonoBehaviour
             m_autCorrHighpassSmoothConfidence[i] = variance;
 
             m_autCorrHighpassSmooth[i] = Mathf.Lerp(m_autCorrHighpassSmooth[i], lowpassSum / windowSize, m_smoothing);
-
         }
 
 
@@ -197,7 +249,6 @@ public class BeatDetector2 : MonoBehaviour
                 float interpolated = getLagrangeMinimum(i, m_autCorrHighpassSmooth);
                 m_currentPeaks.Add(new Peak { index = interpolated, value = m_autCorrHighpassSmooth[i] });
             }
-
         }
 
         m_currentPeaks.Sort((x, y) => y.value.CompareTo(x.value));
@@ -217,20 +268,52 @@ public class BeatDetector2 : MonoBehaviour
 
         AnalyzePeaks(m_bestPeaks);
 
+
+        GetPhaseOffset(m_bestPeriodSmooth, m_flux);
+
         m_lastProcessingTime = (float)(DateTime.Now - startTime).TotalMilliseconds;
         if (Input.GetKey(KeyCode.Space))
         {
             phaseOffset = Time.time;
         }
 
+
+    }
+
+    private void GetPhaseOffset(float period, float[] data)
+    {
+        float bestScore = -1000f;
+        float bestOffset = 0;
+
+        int candidates = Mathf.CeilToInt(period);
+
+        for(int i = 0; i < candidates; i++)
+        {
+            float score = 0;
+            for (float j = data.Length- 1 -i; j >=0; j-=period)
+            {
+                int index = Mathf.RoundToInt(j);
+                score += data[index];
+            }
+
+            if ( score > bestScore)
+            {
+                bestScore = score;
+                bestOffset = i;
+            }
+        }
+        UnityEngine.Debug.Log(bestOffset);
+        m_alignedGrid.Clear();
+
+        for(float i = data.Length - 1 - bestOffset; i >=0; i -= period)
+        {
+            m_alignedGrid.Add(new Peak { index = i/2 , harmonics = 1, value = 1});
+        }
     }
 
     private void AnalyzePeaks(List<Peak> peaks)
     {
-        string str = "";
         float bestPeak = peaks[0].index;
-
-        // Test hypothesis: it is beat
 
         for (int i = 0; i < peaks.Count; i++)
         {
@@ -254,7 +337,6 @@ public class BeatDetector2 : MonoBehaviour
             }
            peaks[p].harmonics /= 8*8*8;
         }
-
 
         float bestGridPeriod = bestPeak;
         float bestScore = 0;
@@ -300,19 +382,36 @@ public class BeatDetector2 : MonoBehaviour
             for (int ii = 0; ii < m_bestPeaks.Count; ii++)
             {
                 float diff = Mathf.Abs(m_bestPeaks[ii].index - index);
-                if (diff < 3)
+                if (diff < MATCH_THRESHOLD)
                 {
-                    sumX += i * m_bestPeaks[ii].harmonics;
-                    sumY += m_bestPeaks[ii].index * m_bestPeaks[ii].harmonics;
+                    sumX += i * m_bestPeaks[ii].value;
+                    sumY += m_bestPeaks[ii].index * m_bestPeaks[ii].value;
                     break;
                 }
             }
 
         }
 
-        float bestFitPeriod = sumY / sumX;
+        float bestFitPeriod = sumY / ( float.Epsilon + sumX);
 
-        for(int i = 0; i < 4; i++)
+        float thisScore = 0;
+        int total = 0;
+        for (int i = 0; i <= 16; i++)
+        {
+            int index = (int)Mathf.Round(i * bestFitPeriod) ;
+             
+            if (index < MAX_SHIFT)
+            {
+                total++;
+                thisScore += m_autCorrHighpassSmooth[index];
+            }
+        }
+        thisScore /= total;
+
+        UnityEngine.Debug.Log(thisScore);
+
+
+        for (int i = 0; i < 4; i++)
         {
             var bpm = GetBPMFromOffset(bestFitPeriod);
 
@@ -326,13 +425,14 @@ public class BeatDetector2 : MonoBehaviour
             }
         }
 
-        BPM = GetBPMFromOffset(bestFitPeriod);
+        m_bestPeriodSmooth = Mathf.Lerp(m_bestPeriodSmooth, bestFitPeriod, m_beatSmooth);
+        BPM = GetBPMFromOffset(m_bestPeriodSmooth);
 
         // generate fitted grid
         m_grid.Clear();
         for (int i = 0; i <= 16; i++)
         {
-            float index = i * bestFitPeriod;
+            float index = i * m_bestPeriodSmooth;
             if (index > MAX_SHIFT)
                 index = 0;
             m_grid.Add(new Peak { index = index, harmonics = 1, value = 1 });
@@ -351,9 +451,9 @@ public class BeatDetector2 : MonoBehaviour
             for (int ii = 0; ii < m_bestPeaks.Count; ii++)
             {
                 float diff = Mathf.Abs(m_bestPeaks[ii].index - targetIndex);
-                if (diff < 1)
+                if (diff < MATCH_THRESHOLD)
                 {
-                    overlap+= m_bestPeaks[ii].value + m_bestPeaks[ii].harmonics + 1;
+                    overlap+= m_bestPeaks[ii].value;
                     break;
                 }
             }
