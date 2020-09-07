@@ -30,6 +30,7 @@ public class BeatDetector2 : MonoBehaviour
 
     public float m_smoothing = 0.001f;
     public float m_beatSmooth = 0.001f;
+    public float m_phaseSmooth = 0.001f;
     
     public int m_grooveHighpass = 10;
     public int m_grooveLowpass = 1;
@@ -44,6 +45,8 @@ public class BeatDetector2 : MonoBehaviour
     int NUM_IMPORTANT_PEAKS = 20;
 
     float MATCH_THRESHOLD = 1.5f;
+
+    float m_currentPhaseOffset;
 
     public float Sensitivity
     {
@@ -282,6 +285,11 @@ public class BeatDetector2 : MonoBehaviour
 
     private void GetPhaseOffset(float period, float[] data)
     {
+
+        m_currentPhaseOffset++;
+        if (m_currentPhaseOffset > period)
+            m_currentPhaseOffset -= period;
+
         float bestScore = -1000f;
         float bestOffset = 0;
 
@@ -302,10 +310,11 @@ public class BeatDetector2 : MonoBehaviour
                 bestOffset = i;
             }
         }
-        UnityEngine.Debug.Log(bestOffset);
+        UnityEngine.Debug.Log(bestOffset + " \t" + m_currentPhaseOffset);
         m_alignedGrid.Clear();
+        m_currentPhaseOffset = Mathf.Lerp(m_currentPhaseOffset, bestOffset, m_phaseSmooth);
 
-        for(float i = data.Length - 1 - bestOffset; i >=0; i -= period)
+        for (float i = data.Length - 1 - m_currentPhaseOffset; i >=0; i -= period)
         {
             m_alignedGrid.Add(new Peak { index = i/2 , harmonics = 1, value = 1});
         }

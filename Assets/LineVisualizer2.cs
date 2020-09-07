@@ -13,6 +13,7 @@ public enum LineType2
     autoCorrelationHighpassSmooth,
     confidence,
     flux,
+    bpmHistogram
 }
 
 public class LineVisualizer2 : MonoBehaviour
@@ -53,6 +54,10 @@ public class LineVisualizer2 : MonoBehaviour
                 m_targetArray = m_beatDetector2.m_flux;
                 break;
 
+ /*           case LineType2.bpmHistogram:
+                m_targetArray = m_beatDetector2.m_bestBeatPeriodHistogram;
+                break;
+ */
         }
 
         if (m_positions == null || m_positions.Length != m_targetArray.Length)
