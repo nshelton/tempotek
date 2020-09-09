@@ -21,6 +21,8 @@ public class BeatControl2 : MonoBehaviour
         }
 
         float val = (1f - m_beat.GetBeat(beat));
+
+        
         m_mesh.material.SetColor("_EmissionColor", Color.white * val);
     }
 }
